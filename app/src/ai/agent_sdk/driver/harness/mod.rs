@@ -480,6 +480,11 @@ pub(super) fn write_temp_file(
             "Failed to write temp file '{prefix}': {e}"
         ))
     })?;
+    file.flush().map_err(|e| {
+        AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
+            "Failed to flush temp file '{prefix}': {e}"
+        ))
+    })?;
     Ok(file)
 }
 

@@ -260,9 +260,5 @@ fn execute_list_directory(call: &ToolCall) -> ToolResult {
         result.push_str(&format!("\n[exit code: {exit_code}]"));
     }
 
-    if exit_code != 0 {
-        ToolResult::err(call.id.clone(), result)
-    } else {
-        ToolResult::ok(call.id.clone(), result)
-    }
+    ToolResult::ok(call.id.clone(), result)
 }

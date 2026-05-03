@@ -59,7 +59,7 @@ impl Config {
 }
 
 fn config_file_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|p| p.join(".config/warp-ai/config.json"))
+    dirs::config_dir().map(|p| p.join("warp-ai/config.json"))
 }
 
 fn load_config_file() -> Result<Option<ConfigFile>> {

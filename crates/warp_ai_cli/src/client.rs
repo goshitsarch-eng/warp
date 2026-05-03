@@ -100,7 +100,11 @@ pub async fn chat_turn(
         stream: true,
     };
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to build HTTP client")?;
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
@@ -120,7 +124,7 @@ pub async fn chat_turn(
     let mut text_content = String::new();
     let mut tool_call_map: std::collections::HashMap<usize, PartialToolCall> =
         std::collections::HashMap::new();
-    let mut buffer = String::new();
+    let mut buffer = String::with_capacity(8192);
     let mut stream = response.bytes_stream();
     let mut stdout = std::io::stdout();
 
@@ -128,38 +132,105 @@ pub async fn chat_turn(
         let chunk = chunk.context("Error reading stream")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(line_end) = buffer.find('\n') {
-            let line = buffer[..line_end].trim().to_owned();
-            buffer = buffer[line_end + 1..].to_owned();
+        while let Some(line_end) = buffer.as_bytes().iter().position(|&b| b == b'\n') {
+            let line = buffer[..line_end].trim();
+            let remaining = &buffer[line_end + 1..];
+            let remaining_len = remaining.len();
 
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    // Stream finished — assemble results.
-                    if tool_call_map.is_empty() {
-                        stdout.write_all(b"\n")?;
-                        stdout.flush()?;
-                        return Ok(TurnResult::Done(text_content));
-                    } else {
-                        let calls: Vec<ToolCall> = tool_call_map
-                            .into_iter()
-                            .map(|(_, partial)| ToolCall {
-                                id: partial.id,
-                                name: partial.name,
-                                arguments: partial.arguments,
-                            })
-                            .collect();
-                        return Ok(TurnResult::ToolCalls {
-                            text: text_content,
-                            calls,
-                        });
+            let data = if let Some(d) = line.strip_prefix("data: ") {
+                d
+            } else {
+                // Shift remaining bytes to the front in-place without reallocation.
+                buffer.drain(..buffer.len() - remaining_len);
+                break;
+            };
+
+            // Shift remaining bytes to the front in-place.
+            buffer.drain(..buffer.len() - remaining_len);
+
+            if data == "[DONE]" {
+                // Stream finished — assemble results.
+                if tool_call_map.is_empty() {
+                    stdout.write_all(b"\n")?;
+                    stdout.flush()?;
+                    return Ok(TurnResult::Done(text_content));
+                } else {
+                    let calls: Vec<ToolCall> = tool_call_map
+                        .into_iter()
+                        .map(|(_, partial)| ToolCall {
+                            id: partial.id,
+                            name: partial.name,
+                            arguments: partial.arguments,
+                        })
+                        .collect();
+                    return Ok(TurnResult::ToolCalls {
+                        text: text_content,
+                        calls,
+                    });
+                }
+            }
+
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
+                    for choice in choices {
+                        if let Some(delta) = choice.get("delta") {
+                            // Text content
+                            if let Some(content) =
+                                delta.get("content").and_then(|c| c.as_str())
+                            {
+                                text_content.push_str(content);
+                                stdout.write_all(content.as_bytes())?;
+                                stdout.flush()?;
+                            }
+
+                            // Tool calls
+                            if let Some(tool_calls) =
+                                delta.get("tool_calls").and_then(|tc| tc.as_array())
+                            {
+                                for tc in tool_calls {
+                                    let index = tc
+                                        .get("index")
+                                        .and_then(|i| i.as_u64())
+                                        .unwrap_or(0) as usize;
+
+                                    let entry =
+                                        tool_call_map.entry(index).or_default();
+
+                                    if let Some(id) =
+                                        tc.get("id").and_then(|i| i.as_str())
+                                    {
+                                        entry.id = id.to_owned();
+                                    }
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) =
+                                            func.get("name").and_then(|n| n.as_str())
+                                        {
+                                            entry.name = name.to_owned();
+                                        }
+                                        if let Some(args) = func
+                                            .get("arguments")
+                                            .and_then(|a| a.as_str())
+                                        {
+                                            entry.arguments.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+            }
+        }
+    }
 
+    // Stream ended without [DONE] — process any trailing data in the buffer.
+    if !buffer.trim().is_empty() {
+        if let Some(data) = buffer.trim().strip_prefix("data: ") {
+            if data != "[DONE]" {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
                         for choice in choices {
                             if let Some(delta) = choice.get("delta") {
-                                // Text content
                                 if let Some(content) =
                                     delta.get("content").and_then(|c| c.as_str())
                                 {
@@ -167,8 +238,6 @@ pub async fn chat_turn(
                                     stdout.write_all(content.as_bytes())?;
                                     stdout.flush()?;
                                 }
-
-                                // Tool calls
                                 if let Some(tool_calls) =
                                     delta.get("tool_calls").and_then(|tc| tc.as_array())
                                 {
@@ -177,10 +246,8 @@ pub async fn chat_turn(
                                             .get("index")
                                             .and_then(|i| i.as_u64())
                                             .unwrap_or(0) as usize;
-
                                         let entry =
                                             tool_call_map.entry(index).or_default();
-
                                         if let Some(id) =
                                             tc.get("id").and_then(|i| i.as_str())
                                         {
@@ -209,7 +276,6 @@ pub async fn chat_turn(
         }
     }
 
-    // Stream ended without [DONE] — return what we have.
     if tool_call_map.is_empty() {
         stdout.write_all(b"\n")?;
         stdout.flush()?;

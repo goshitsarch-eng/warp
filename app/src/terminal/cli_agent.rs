@@ -212,7 +212,7 @@ impl CLIAgent {
             CLIAgent::Auggie => Some(Icon::AuggieLogo),
             CLIAgent::CursorCli => Some(Icon::CursorLogo),
             CLIAgent::Goose => Some(Icon::GooseLogo),
-            CLIAgent::WarpAi => None,
+            CLIAgent::WarpAi => Some(Icon::Warp),
             CLIAgent::Unknown => None,
         }
     }
